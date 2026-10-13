@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light">
+<title>Personal Expense Manager</title>
+<style>
+/* ===== STYLE: plain white page, simple borders ===== */
+:root { box-sizing: border-box; padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
+*, *::before, *::after { box-sizing: border-box; }
+html { scroll-padding-top: env(safe-area-inset-top, 0px); background: #fff; }
+body { margin: 0; background: #fff; color: #000; font: 14px Arial, sans-serif; }
+button, input, select, textarea { font: inherit; color: #000; }
+button { background: #fff; border: 1px solid #999; border-radius: 4px; padding: 9px 18px; cursor: pointer; }
+button:hover, button.on { background: #e6f0fb; }
+input, select, textarea { background: #fff; border: 1px solid #999; border-radius: 3px; padding: 8px 10px; }
+.win { max-width: 1000px; margin: 0 auto; padding: 16px; }
+.top { border-bottom: 1px solid #ccc; padding: 12px 16px; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.sp { flex: 1; }
+.login { max-width: 420px; margin: 48px auto; border: 1px solid #ccc; padding: 28px; }
+h1 { font-size: 22px; text-align: center; margin: 0 0 24px; }
+h2 { font-size: 16px; margin: 28px 0 12px; }
+.row { display: flex; align-items: center; gap: 12px; margin: 14px 0; }
+.row label { width: 140px; flex: none; }
+.row input, .row select { flex: 1; min-width: 0; }
+.btns { display: flex; flex-wrap: wrap; gap: 14px; margin: 20px 0; }
+.center { justify-content: center; } .right { justify-content: flex-end; }
+.summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.box { border: 1px solid #ccc; padding: 16px 18px; }
+.box div { font-size: 26px; font-weight: bold; margin-top: 10px; }
+.tablewrap { overflow-x: auto; border: 1px solid #ccc; }
+table { border-collapse: collapse; width: 100%; min-width: 620px; }
+th { text-align: left; font-weight: normal; padding: 10px; border-bottom: 1px solid #ccc; }
+td { padding: 9px 10px; border-bottom: 1px solid #eee; }
+td button { padding: 6px 12px; margin: 2px 6px 2px 0; }
+.empty { padding: 24px; color: #666; text-align: center; }
+.overlay { position: fixed; inset: 0; background: rgba(0,0,0,.4); display: flex; align-items: center; justify-content: center; padding: 12px; }
+.dialog { background: #fff; border: 1px solid #ccc; width: 100%; max-width: 500px; max-height: 92vh; overflow: auto; }
+.dialog .t { padding: 12px 18px; border-bottom: 1px solid #ccc; font-weight: bold; }
+.dialog .body { padding: 18px; }
+pre, textarea.out { border: 1px solid #ccc; padding: 14px; font: 13px Consolas, monospace; margin: 0; overflow: auto; width: 100%; background: #fff; }
+.err { color: #b00020; min-height: 18px; } .ok { color: #1b6e2d; min-height: 18px; }
+.note { margin-top: 16px; color: #666; font-size: 12px; }
+@media (max-width: 620px) { .summary { grid-template-columns: 1fr; } .row label { width: 100px; } .login { margin: 16px; padding: 18px; } }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script>
+/* ===== 1. DATA: everything is saved in the browser (localStorage) ===== */
+const RS = "\u20B9";
+const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+let DB = { users: [], categories: [], transactions: [], budgets: [] };  // all app data
+let me = null;                                  // logged-in user
+let page = "home";                              // current page: home / tx / rep
+let filt = { q: "", type: "All", cat: "All" };  // filters on the Transactions page
+
+try { DB = JSON.parse(localStorage.getItem("pem")) || DB; } catch (e) {}
+const save = () => { try { localStorage.setItem("pem", JSON.stringify(DB)); } catch (e) {} };
+
+/* ===== 2. SMALL HELPERS ===== */
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const money = v => RS + v.toFixed(2);
+const nextId = list => list.reduce((m, x) => Math.max(m, x.id), 0) + 1;
+const pad = (a, n) => (a + " ".repeat(n)).slice(0, n);
+const line = (a, b) => pad(a, 22) + b.padStart(14) + "\n";          // one report line
+const fmt = iso => iso.split("-").reverse().join("-");              // 2026-09-05 -> 05-09-2026
+const today = () => { const d = new Date(); return String(d.getDate()).padStart(2, "0") + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + d.getFullYear(); };
+const hash = async p => {                                           // password -> SHA-256 text
+  try { return [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(p)))].map(x => x.toString(16).padStart(2, "0")).join(""); }
+  catch (e) { return btoa(p); }
+};
+
+/* ===== 3. VALIDATION: throws a message string if input is wrong ===== */
+function parseDate(s) {                                             // dd-MM-yyyy -> yyyy-MM-dd
+  const m = /^(\d\d)-(\d\d)-(\d{4})$/.exec(s.trim()), d = m && new Date(m[3], m[2] - 1, m[1]);
+  if (!m || d.getDate() != m[1] || d.getMonth() != m[2] - 1) throw "Date must be a valid date in dd-MM-yyyy format.";
+  return `${m[3]}-${m[2]}-${m[1]}`;
+}
+function parseAmount(s) {
+  if (!/^\s*\d*\.?\d+\s*$/.test(s)) throw "Amount must be a number.";
+  if (+s <= 0) throw "Amount must be greater than zero.";
+  return +s;
+}
+
+/* ===== 4. DATA QUERIES: totals, categories, budget (only for the logged-in user) ===== */
+const mine = () => DB.transactions.filter(t => t.userId === me.id);
+const cats = type => DB.categories.filter(c => c.userId === me.id && (!type || c.type === type));
+const inMonth = (t, m, y) => !m || (+t.date.slice(5, 7) === m && +t.date.slice(0, 4) === y);   // m = 0 means all time
+const sum = (type, m, y) => mine().filter(t => t.type === type && inMonth(t, m, y)).reduce((s, t) => s + t.amount, 0);
+const byCat = (type, m, y) => mine().filter(t => t.type === type && inMonth(t, m, y)).reduce((o, t) => (o[t.category] = (o[t.category] || 0) + t.amount, o), {});
+const budgetRow = (m, y) => DB.budgets.find(b => b.userId === me.id && b.month === m && b.year === y);
+const budgetOf = (m, y) => (budgetRow(m, y) || {}).amount || 0;
+function addCats(uid) {                                             // default categories for a new user
+  ["Scholarship", "Pocket Money", "Salary", "Other"].forEach(n => DB.categories.push({ id: nextId(DB.categories), userId: uid, name: n, type: "Income" }));
+  ["Food", "Travel", "Education", "Entertainment", "Shopping", "Other"].forEach(n => DB.categories.push({ id: nextId(DB.categories), userId: uid, name: n, type: "Expense" }));
+}
+
+/* ===== 5. POPUPS: replace alert/confirm (browsers block those inside this page) ===== */
+function dialog(title, html, buttons) {                             // buttons = [[label, function], ...]
+  closeDialog();
+  const o = document.createElement("div");
+  o.className = "overlay"; o.id = "ov";
+  o.innerHTML = `<div class="dialog"><div class="t">${esc(title)}</div><div class="body">${html}<div class="btns right" id="dbtns"></div></div></div>`;
+  document.body.appendChild(o);
+  buttons.forEach(([label, fn]) => { const b = document.createElement("button"); b.textContent = label; b.onclick = fn; $("dbtns").appendChild(b); });
+  const first = o.querySelector("input"); if (first) first.focus();
+}
+const closeDialog = () => { const o = $("ov"); if (o) o.remove(); };
+const msg = text => dialog("Message", esc(text), [["OK", closeDialog]]);
+const ask = (text, onYes) => dialog("Confirm", esc(text), [["Cancel", closeDialog], ["Yes", () => { closeDialog(); onYes(); }]]);
+
+/* ===== 6. DOWNLOAD + SHARE ===== */
+async function saveFile(name, data, statusId) {                     // asks the user to save a file
+  const st = statusId && $(statusId);
+  try {
+    const dl = typeof claude !== "undefined" ? await claude.use("downloads") : null;   // inside Claude: its save popup
+    if (dl) await dl.save({ filename: name, data });
+    else {                                                                              // on GitHub Pages: normal browser download
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([data])); a.download = name; a.click();
+    }
+    if (st) { st.className = "ok"; st.textContent = "Saved " + name; }
+  } catch (e) {
+    if (e && e.code === "declined") return;
+    if (st) { st.className = "err"; st.textContent = (e && e.message) || "Could not save the file."; } else msg((e && e.message) || "Could not save the file.");
+  }
+}
+const csvCell = v => /[",\n]/.test(v) ? '"' + String(v).replace(/"/g, '""') + '"' : v;
+const toCsv = rows => "ID,Date,Type,Category,Amount,Description\n" + rows.map(t => [t.id, fmt(t.date), t.type, t.category, t.amount.toFixed(2), t.description].map(csvCell).join(",")).join("\n") + "\n";
+const billText = t => `PERSONAL EXPENSE MANAGER\nBill / Receipt\n-------------------------------------\nName:        ${me.name}\nBill No:     ${t.id}\nDate:        ${fmt(t.date)}\nType:        ${t.type}\nCategory:    ${t.category}\nDescription: ${t.description || "-"}\n-------------------------------------\nAmount:      ${money(t.amount)}\n`;
+const billHtml = t => `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Bill ${t.id}</title></head><body style="font:15px Arial;margin:40px"><h2>Personal Expense Manager</h2><pre style="font:15px Arial">${esc(billText(t))}</pre></body></html>`;
+function shareDialog(title, text, file, extra) {                    // popup with Share / Copy / Download buttons
+  const buttons = [["Close", closeDialog],
+    ["Share", async () => {
+      try { if (!navigator.share) throw 0; await navigator.share({ title, text }); }
+      catch (e) { if (e && e.name === "AbortError") return;
+        try { await navigator.clipboard.writeText(text); $("shst").className = "ok"; $("shst").textContent = "Copied. Paste it in WhatsApp, SMS or email."; }
+        catch (e2) { $("shst").className = "err"; $("shst").textContent = "Sharing is blocked here. Copy the text above."; } }
+    }],
+    ["Download .txt", () => saveFile(file + ".txt", text, "shst")]];
+  if (extra) buttons.push(["Download Bill", () => saveFile(file + ".html", extra, "shst")]);
+  dialog(title, `<textarea class="out" rows="12" readonly>${esc(text)}</textarea><div id="shst"></div>`, buttons);
+}
+
+/* ===== 7. BUTTON ACTIONS: every button has data-act="name" and runs ACT[name] ===== */
+const ACT = {
+  async login() {                                                   // check email + password
+    const em = $("em").value.trim().toLowerCase(), pw = $("pw").value;
+    const u = DB.users.find(x => x.email === em);
+    if (!em || !pw) return $("err").textContent = "Enter your email and password.";
+    if (!u || u.hash !== await hash(pw)) return $("err").textContent = "Invalid email or password.";
+    me = u; page = "home"; filt = { q: "", type: "All", cat: "All" }; showMain();
+  },
+  register() {
+    dialog("Create Account", `<div class="row"><label>Name:</label><input id="rn"></div><div class="row"><label>Email:</label><input id="re"></div>
+      <div class="row"><label>Password:</label><input id="rp" type="password"></div><div class="row"><label>Confirm Password:</label><input id="rc" type="password"></div><div class="err" id="derr"></div>`,
+      [["Cancel", closeDialog], ["Register", async () => {
+        const n = $("rn").value.trim(), e = $("re").value.trim().toLowerCase(), p = $("rp").value, er = $("derr");
+        if (!n) return er.textContent = "Name is required.";
+        if (!/^[\w.+-]+@[\w-]+(\.[\w-]+)+$/.test(e)) return er.textContent = "Enter a valid email address.";
+        if (p.length < 6) return er.textContent = "Password must be at least 6 characters.";
+        if (p !== $("rc").value) return er.textContent = "Passwords do not match.";
+        if (DB.users.some(x => x.email === e)) return er.textContent = "An account with this email already exists.";
+        const id = nextId(DB.users);
+        DB.users.push({ id, name: n, email: e, hash: await hash(p) });
+        addCats(id); save(); msg("Account created. You can now log in.");
+      }]]);
+  },
+  logout() { me = null; showLogin(); },
+  nav(b) { page = b.dataset.p; draw(); },
+  addIncome() { txDialog("Income"); },
+  addExpense() { txDialog("Expense"); },
+  edit(b) { const t = findTx(b); txDialog(t.type, t); },
+  del(b) { const t = findTx(b); ask("Delete this transaction?", () => { DB.transactions = DB.transactions.filter(x => x !== t); save(); draw(); }); },
+  bill(b) { const t = findTx(b); shareDialog("Share Bill", billText(t), "bill-" + t.id, billHtml(t)); },
+  csv() { saveFile("expenses.csv", toCsv(page === "tx" ? filtered() : mine())); },
+  shareSum() { shareDialog("Share Summary", `Personal Expense Manager - ${me.name}\nAs on ${today()}\n\n` + line("Total Income", money(sum("Income"))) + line("Total Expense", money(sum("Expense"))) + line("Balance", money(sum("Income") - sum("Expense"))), "summary"); },
+  apply() { filt = { q: $("q").value, type: $("ty").value, cat: $("ca").value }; draw(); },
+  clear() { filt = { q: "", type: "All", cat: "All" }; draw(); },
+  repShare() { shareDialog("Share Report", $("rout").textContent, "report"); },
+  repDl() { saveFile("report.txt", $("rout").textContent, "rst"); },
+  saveBudget() {
+    try {
+      const a = parseAmount($("ba").value), m = +$("bm").value, y = +$("by").value, b = budgetRow(m, y);
+      if (b) b.amount = a; else DB.budgets.push({ userId: me.id, month: m, year: y, amount: a });
+      save(); budgetStatus(); genReport();
+    } catch (e) { $("bst").className = "err"; $("bst").textContent = e; }
+  },
+  addCat() {
+    const n = $("cnm").value.trim(), t = $("ctp").value;
+    if (!n) return $("cerr").textContent = "Category name is required.";
+    if (cats(t).some(c => c.name.toLowerCase() === n.toLowerCase())) return $("cerr").textContent = "That category already exists.";
+    DB.categories.push({ id: nextId(DB.categories), userId: me.id, name: n, type: t }); save(); draw();
+  },
+  delCat(b) {
+    const c = DB.categories.find(x => x.id == b.dataset.id);
+    if (mine().some(t => t.type === c.type && t.category === c.name)) return $("cerr").textContent = "This category is used by existing transactions.";
+    DB.categories = DB.categories.filter(x => x !== c); save(); draw();
+  },
+};
+const findTx = b => DB.transactions.find(t => t.id == b.dataset.id);
+document.addEventListener("click", e => { const b = e.target.closest("[data-act]"); if (b) ACT[b.dataset.act](b); });
+document.addEventListener("keydown", e => { if (e.key === "Enter" && e.target.id === "pw") ACT.login(); });
+document.addEventListener("input", e => {                           // live update on the Reports page
+  if (["rk", "rm", "ry"].includes(e.target.id)) genReport();
+  if (["bm", "by"].includes(e.target.id)) budgetStatus();
+});
+
+/* ===== 8. ADD / EDIT POPUP (same popup for both) ===== */
+function txDialog(type, t) {
+  dialog((t ? "Edit " : "Add ") + type, `<div class="row"><label>Date (dd-MM-yyyy):</label><input id="fd"></div><div class="row"><label>Amount:</label><input id="fa" inputmode="decimal"></div>
+    <div class="row"><label>Category:</label><select id="fc">${cats(type).map(c => `<option>${esc(c.name)}</option>`).join("")}</select></div>
+    <div class="row"><label>Description:</label><input id="fx"></div><div class="err" id="derr"></div>`,
+    [["Cancel", closeDialog], ["Save", () => {
+      try {
+        const rec = { date: parseDate($("fd").value), amount: parseAmount($("fa").value), category: $("fc").value, description: $("fx").value.trim() };
+        if (!rec.category) throw "Add a category first (Reports page).";
+        if (t) Object.assign(t, rec); else DB.transactions.push({ id: nextId(DB.transactions), userId: me.id, type, ...rec });
+        save(); closeDialog(); draw();
+      } catch (e) { $("derr").textContent = e; }
+    }]]);
+  $("fd").value = t ? fmt(t.date) : today();
+  if (t) { $("fa").value = t.amount; $("fc").value = t.category; $("fx").value = t.description; }
+}
+
+/* ===== 9. PAGES ===== */
+function showLogin() {                                              // login screen
+  document.title = "Personal Expense Manager";
+  $("app").innerHTML = `<div class="login"><h1>PERSONAL EXPENSE MANAGER</h1>
+    <div class="row"><label>Email:</label><input id="em" autocapitalize="none"></div>
+    <div class="row"><label>Password:</label><input id="pw" type="password"></div><div class="err" id="err"></div>
+    <div class="btns center"><button data-act="login">Login</button><button data-act="register">Create Account</button></div>
+    <div class="note">Web test version of the Java Swing app. Data is saved in this browser only.</div></div>`;
+}
+function showMain() {                                               // top bar + empty page area
+  document.title = "Personal Expense Manager - " + me.name;
+  $("app").innerHTML = `<div class="top"><b>Personal Expense Manager - ${esc(me.name)}</b>
+    <button data-act="nav" data-p="home">Home</button><button data-act="nav" data-p="tx">Transactions</button><button data-act="nav" data-p="rep">Reports</button>
+    <span class="sp"></span><button data-act="logout">Logout</button></div><div class="win" id="page"></div>`;
+  draw();
+}
+function draw() {                                                   // show the current page
+  document.querySelectorAll("[data-p]").forEach(b => b.className = b.dataset.p === page ? "on" : "");
+  $("page").innerHTML = page === "home" ? homePage() : page === "tx" ? txPage() : repPage();
+  if (page === "rep") { genReport(); budgetStatus(); }
+}
+
+/* table used by Home and Transactions: each row has Edit / Delete / Bill buttons */
+const rowsTable = rows => `<div class="tablewrap"><table><tr><th>Date</th><th>Type</th><th>Category</th><th>Amount</th><th>Description</th><th>Action</th></tr>` +
+  (rows.length ? rows.map(t => `<tr><td>${fmt(t.date)}</td><td>${t.type}</td><td>${esc(t.category)}</td><td>${t.amount.toFixed(2)}</td><td>${esc(t.description)}</td>
+    <td style="white-space:nowrap"><button data-act="edit" data-id="${t.id}">Edit</button><button data-act="del" data-id="${t.id}">Delete</button><button data-act="bill" data-id="${t.id}">Bill</button></td></tr>`).join("")
+    : `<tr><td colspan="6" class="empty">No transactions found.</td></tr>`) + `</table></div>`;
+const newestFirst = rows => rows.sort((a, b) => a.date < b.date ? 1 : a.date > b.date ? -1 : b.id - a.id);
+
+/* PAGE 1: HOME - totals, quick buttons, budget, 5 latest transactions */
+function homePage() {
+  const d = new Date(), m = d.getMonth() + 1, y = d.getFullYear(), b = budgetOf(m, y), s = sum("Expense", m, y), i = sum("Income"), e = sum("Expense");
+  const status = !b ? `No budget set for ${MONTHS[m - 1]}. Set one on the Reports page.` : `${MONTHS[m - 1]} budget: ${money(s)} of ${money(b)} ` + (s > b ? `(over by ${money(s - b)})` : `(${(s * 100 / b).toFixed(1)}% used)`);
+  return `<div class="summary"><div class="box"><b>TOTAL INCOME</b><div>${money(i)}</div></div><div class="box"><b>TOTAL EXPENSE</b><div>${money(e)}</div></div><div class="box"><b>BALANCE</b><div>${money(i - e)}</div></div></div>
+    <div class="btns"><button data-act="addIncome">+ Add Income</button><button data-act="addExpense">+ Add Expense</button><button data-act="csv">Download All Expenses</button><button data-act="shareSum">Share Summary</button></div>
+    <h2>Budget</h2><div>${esc(status)}</div><h2>Recent transactions</h2>${rowsTable(newestFirst(mine()).slice(0, 5))}`;
+}
+
+/* PAGE 2: TRANSACTIONS - search, filters, full list */
+const filtered = () => newestFirst(mine().filter(t => {
+  const q = filt.q.trim().toLowerCase();
+  return (filt.type === "All" || t.type === filt.type) && (filt.cat === "All" || t.category === filt.cat) &&
+    (!q || `${t.description} ${t.category} ${t.type} ${fmt(t.date)} ${t.amount}`.toLowerCase().includes(q));
+}));
+function txPage() {
+  const names = [...new Set(cats().map(c => c.name))];
+  const opt = (list, cur) => list.map(n => `<option${n === cur ? " selected" : ""}>${esc(n)}</option>`).join("");
+  return `<div class="btns" style="margin-top:0"><button data-act="addIncome">+ Add Income</button><button data-act="addExpense">+ Add Expense</button><button data-act="csv">Download CSV</button></div>
+    <div class="btns">Search <input id="q" size="14" value="${esc(filt.q)}"> Type <select id="ty">${opt(["All", "Income", "Expense"], filt.type)}</select>
+    Category <select id="ca">${opt(["All", ...names], filt.cat)}</select><button data-act="apply">Apply</button><button data-act="clear">Clear</button></div>${rowsTable(filtered())}`;
+}
+
+/* PAGE 3: REPORTS - report text, budget, categories */
+const monthOpts = sel => MONTHS.map((n, i) => `<option value="${i + 1}"${i + 1 === sel ? " selected" : ""}>${n}</option>`).join("");
+function repPage() {
+  const now = new Date(), m = now.getMonth() + 1, y = now.getFullYear();
+  return `<h2 style="margin-top:0">Reports</h2>
+    <div class="btns" style="margin-top:0"><select id="rk"><option value="monthly">Monthly Summary</option><option value="cat">Category-wise (All Time)</option></select>
+    <select id="rm">${monthOpts(m)}</select><input id="ry" type="number" value="${y}" style="width:90px"></div><pre id="rout"></pre>
+    <div class="btns"><button data-act="repShare">Share Report</button><button data-act="repDl">Download Report</button><button data-act="csv">Download All Expenses (CSV)</button></div><div id="rst"></div>
+    <h2>Monthly Budget</h2><div class="btns" style="margin-top:0"><select id="bm">${monthOpts(m)}</select><input id="by" type="number" value="${y}" style="width:90px">
+    <input id="ba" inputmode="decimal" placeholder="Budget amount"><button data-act="saveBudget">Save Budget</button></div><div id="bst"></div>
+    <h2>Categories</h2><div class="btns" style="margin-top:0"><select id="ctp"><option>Income</option><option selected>Expense</option></select><input id="cnm" placeholder="Category name"><button data-act="addCat">Add</button></div>
+    <div class="tablewrap"><table><tr><th>Type</th><th>Category</th><th>Action</th></tr>${cats().map(c => `<tr><td>${c.type}</td><td>${esc(c.name)}</td><td><button data-act="delCat" data-id="${c.id}">Delete</button></td></tr>`).join("")}</table></div><div class="err" id="cerr"></div>`;
+}
+function genReport() {                                              // builds the report text shown on the Reports page
+  const kind = $("rk").value, m = +$("rm").value, y = +$("ry").value;
+  $("rm").disabled = $("ry").disabled = kind !== "monthly";
+  let s = "";
+  if (kind === "monthly") {
+    const i = sum("Income", m, y), e = sum("Expense", m, y), b = budgetOf(m, y), c = byCat("Expense", m, y);
+    s = `${MONTHS[m - 1]} ${y}\n\n` + line("Income", money(i)) + Object.keys(c).sort().map(k => line(k, money(c[k]))).join("") +
+      "-".repeat(37) + "\n" + line("Total Expense", money(e)) + line("Balance", money(i - e)) + "\n" +
+      (b ? line("Monthly Budget", money(b)) + line("Budget Used", (e * 100 / b).toFixed(1) + "%") + (e > b ? "Status: Over budget\n" : "Status: Within budget\n") : "No budget set for this month.\n");
+  } else {
+    s = "Category-wise Summary (All Time)\n\n";
+    ["Income", "Expense"].forEach(t => { const c = byCat(t, 0, 0); s += t.toUpperCase() + "\n" + (Object.keys(c).length ? Object.keys(c).sort().map(k => "  " + pad(k, 20) + money(c[k]).padStart(14) + "\n").join("") : "  (none)\n") + "\n"; });
+    s += "-".repeat(37) + "\n" + line("Balance", money(sum("Income") - sum("Expense")));
+  }
+  $("rout").textContent = s;
+}
+function budgetStatus() {                                           // shows spent / left for the chosen month
+  const m = +$("bm").value, y = +$("by").value, b = budgetOf(m, y), s = sum("Expense", m, y);
+  $("ba").value = b || "";
+  $("bst").className = "";
+  $("bst").textContent = !b ? `No budget set. Spent so far: ${money(s)}` : s > b ? `Over budget by ${money(s - b)} (spent ${money(s)})` : `${(s * 100 / b).toFixed(1)}% used, ${money(b - s)} left`;
+}
+
+/* ===== 10. START: create the demo account (demo / demo) once, then show login ===== */
+(async () => {
+  if (!DB.users.some(u => u.email === "demo")) {
+    const id = nextId(DB.users);
+    DB.users.push({ id, name: "Admin", email: "demo", hash: await hash("demo"), role: "Admin" });
+    addCats(id); save();
+  }
+  showLogin();
+})();
+</script>
+</body>
+</html>
